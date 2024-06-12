@@ -36,6 +36,9 @@ class BitwardenLoginCredentialParameterYAML(ParameterYAML):
     bitwarden_master_password_aws_secret_key: str
     # parameter key for the url to request the login credentials from bitwarden
     url_parameter_key: str
+    # bitwarden collection id to filter the login credentials from,
+    # if not provided, no filtering will be done
+    bitwarden_collection_id: str | None = None
 
 
 class WorkflowParameterYAML(ParameterYAML):
@@ -87,6 +90,7 @@ class TaskBlockYAML(BlockYAML):
     max_retries: int = 0
     max_steps_per_run: int | None = None
     parameter_keys: list[str] | None = None
+    complete_on_download: bool = False
 
 
 class ForLoopBlockYAML(BlockYAML):

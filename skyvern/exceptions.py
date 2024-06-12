@@ -47,7 +47,7 @@ class ScriptNotFound(SkyvernException):
 
 
 class MissingElement(SkyvernException):
-    def __init__(self, xpath: str | None = None, element_id: int | None = None):
+    def __init__(self, xpath: str | None = None, element_id: str | None = None):
         super().__init__(
             f"Found no elements. Might be due to previous actions which removed this element."
             f" xpath={xpath} element_id={element_id}",
@@ -55,7 +55,7 @@ class MissingElement(SkyvernException):
 
 
 class MultipleElementsFound(SkyvernException):
-    def __init__(self, num: int, xpath: str | None = None, element_id: int | None = None):
+    def __init__(self, num: int, xpath: str | None = None, element_id: str | None = None):
         super().__init__(
             f"Found {num} elements. Expected 1. num_elements={num} xpath={xpath} element_id={element_id}",
         )
@@ -266,9 +266,19 @@ class UnknownElementTreeFormat(SkyvernException):
 
 class StepTerminationError(SkyvernException):
     def __init__(self, step_id: str, reason: str) -> None:
-        super().__init__(f"Step {step_id} cannot be executed and task is terminated. Reason: {reason}")
+        super().__init__(f"Step {step_id} cannot be executed and task is failed. Reason: {reason}")
+
+
+class StepUnableToExecuteError(SkyvernException):
+    def __init__(self, step_id: str, reason: str) -> None:
+        super().__init__(f"Step {step_id} cannot be executed and task execution is stopped. Reason: {reason}")
 
 
 class UnsupportedActionType(SkyvernException):
     def __init__(self, action_type: str):
         super().__init__(f"Unsupport action type: {action_type}")
+
+
+class InvalidElementForTextInput(SkyvernException):
+    def __init__(self, element_id: str, tag_name: str):
+        super().__init__(f"The {tag_name} element with id={element_id} doesn't support text input.")

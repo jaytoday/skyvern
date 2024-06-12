@@ -71,6 +71,14 @@ class Block(BaseModel, abc.ABC):
         workflow_run_id: str,
         value: dict[str, Any] | list | str | None = None,
     ) -> None:
+        if workflow_run_context.has_value(self.output_parameter.key):
+            LOG.warning(
+                "Output parameter value already recorded",
+                output_parameter_id=self.output_parameter.output_parameter_id,
+                workflow_run_id=workflow_run_id,
+            )
+            return
+
         await workflow_run_context.register_output_parameter_value_post_execution(
             parameter=self.output_parameter,
             value=value,
@@ -150,6 +158,7 @@ class TaskBlock(Block):
     max_retries: int = 0
     max_steps_per_run: int | None = None
     parameters: list[PARAMETER_TYPE] = []
+    complete_on_download: bool = False
 
     def get_all_parameters(
         self,
@@ -265,6 +274,7 @@ class TaskBlock(Block):
                     task=task,
                     step=step,
                     workflow_run=workflow_run,
+                    complete_on_download=self.complete_on_download,
                 )
             except Exception as e:
                 # Make sure the task is marked as failed in the database before raising the exception
@@ -663,9 +673,9 @@ class UploadToS3Block(Block):
             client = self.get_async_aws_client()
             # is the file path a file or a directory?
             if os.path.isdir(self.path):
-                # get all files in the directory, if there are more than 10 files, we will not upload them
+                # get all files in the directory, if there are more than 25 files, we will not upload them
                 files = os.listdir(self.path)
-                if len(files) > 10:
+                if len(files) > 25:
                     raise ValueError("Too many files in the directory, not uploading")
                 for file in files:
                     # if the file is a directory, we will not upload it

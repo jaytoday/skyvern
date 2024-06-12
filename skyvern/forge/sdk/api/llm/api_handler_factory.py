@@ -38,7 +38,7 @@ class LLMAPIHandlerFactory:
             redis_password=llm_config.redis_password,
             routing_strategy=llm_config.routing_strategy,
             fallbacks=(
-                [{llm_config.main_model_group: llm_config.fallback_model_group}]
+                [{llm_config.main_model_group: [llm_config.fallback_model_group]}]
                 if llm_config.fallback_model_group
                 else []
             ),
@@ -97,7 +97,9 @@ class LLMAPIHandlerFactory:
                     ).encode("utf-8"),
                 )
             try:
+                LOG.info("Calling LLM API", llm_key=llm_key, model=llm_config.model_name)
                 response = await router.acompletion(model=main_model_group, messages=messages, **parameters)
+                LOG.info("LLM API call successful", llm_key=llm_key, model=llm_config.model_name)
             except openai.OpenAIError as e:
                 raise LLMProviderError(llm_key) from e
             except Exception as e:
@@ -115,11 +117,15 @@ class LLMAPIHandlerFactory:
                     data=response.model_dump_json(indent=2).encode("utf-8"),
                 )
                 llm_cost = litellm.completion_cost(completion_response=response)
+                prompt_tokens = response.get("usage", {}).get("prompt_tokens", 0)
+                completion_tokens = response.get("usage", {}).get("completion_tokens", 0)
                 await app.DATABASE.update_step(
                     task_id=step.task_id,
                     step_id=step.step_id,
                     organization_id=step.organization_id,
                     incremental_cost=llm_cost,
+                    incremental_input_tokens=prompt_tokens if prompt_tokens > 0 else None,
+                    incremental_output_tokens=completion_tokens if completion_tokens > 0 else None,
                 )
             parsed_response = parse_api_response(response, llm_config.add_assistant_prefix)
             if step:
@@ -206,11 +212,15 @@ class LLMAPIHandlerFactory:
                     data=response.model_dump_json(indent=2).encode("utf-8"),
                 )
                 llm_cost = litellm.completion_cost(completion_response=response)
+                prompt_tokens = response.get("usage", {}).get("prompt_tokens", 0)
+                completion_tokens = response.get("usage", {}).get("completion_tokens", 0)
                 await app.DATABASE.update_step(
                     task_id=step.task_id,
                     step_id=step.step_id,
                     organization_id=step.organization_id,
                     incremental_cost=llm_cost,
+                    incremental_input_tokens=prompt_tokens if prompt_tokens > 0 else None,
+                    incremental_output_tokens=completion_tokens if completion_tokens > 0 else None,
                 )
             parsed_response = parse_api_response(response, llm_config.add_assistant_prefix)
             if step:

@@ -18,11 +18,13 @@ from skyvern.exceptions import (
     InvalidWorkflowTaskURLState,
     MissingBrowserStatePage,
     StepTerminationError,
+    StepUnableToExecuteError,
     TaskNotFound,
 )
 from skyvern.forge import app
 from skyvern.forge.async_operations import AgentPhase, AsyncOperationPool
 from skyvern.forge.prompts import prompt_engine
+from skyvern.forge.sdk.api.files import get_number_of_files_in_directory, get_path_for_workflow_download_directory
 from skyvern.forge.sdk.artifact.models import ArtifactType
 from skyvern.forge.sdk.core import skyvern_context
 from skyvern.forge.sdk.core.security import generate_skyvern_signature
@@ -35,7 +37,6 @@ from skyvern.forge.sdk.workflow.models.workflow import Workflow, WorkflowRun
 from skyvern.webeye.actions.actions import (
     Action,
     ActionType,
-    ActionTypeUnion,
     CompleteAction,
     UserDefinedError,
     WebAction,
@@ -51,7 +52,7 @@ LOG = structlog.get_logger()
 
 
 class ActionLinkedNode:
-    def __init__(self, action: ActionTypeUnion) -> None:
+    def __init__(self, action: Action) -> None:
         self.action = action
         self.next: ActionLinkedNode | None = None
 
@@ -195,12 +196,21 @@ class ForgeAgent:
         api_key: str | None = None,
         workflow_run: WorkflowRun | None = None,
         close_browser_on_completion: bool = True,
+        # If complete_on_download is True and there is a workflow run, the task will be marked as completed
+        # if a download happens during the step execution.
+        complete_on_download: bool = False,
     ) -> Tuple[Step, DetailedAgentStepOutput | None, Step | None]:
         next_step: Step | None = None
         detailed_output: DetailedAgentStepOutput | None = None
+        num_files_before = 0
         try:
+            if task.workflow_run_id:
+                num_files_before = get_number_of_files_in_directory(
+                    get_path_for_workflow_download_directory(task.workflow_run_id)
+                )
             # Check some conditions before executing the step, throw an exception if the step can't be executed
             await app.AGENT_FUNCTION.validate_step_execution(task, step)
+
             (
                 step,
                 browser_state,
@@ -213,6 +223,30 @@ class ForgeAgent:
             step, detailed_output = await self.agent_step(task, step, browser_state, organization=organization)
             task = await self.update_task_errors_from_detailed_output(task, detailed_output)
             retry = False
+
+            if complete_on_download and task.workflow_run_id:
+                num_files_after = get_number_of_files_in_directory(
+                    get_path_for_workflow_download_directory(task.workflow_run_id)
+                )
+                if num_files_after > num_files_before:
+                    LOG.info(
+                        "Task marked as completed due to download",
+                        task_id=task.task_id,
+                        num_files_before=num_files_before,
+                        num_files_after=num_files_after,
+                    )
+                    last_step = await self.update_step(step, is_last=True)
+                    completed_task = await self.update_task(
+                        task,
+                        status=TaskStatus.completed,
+                    )
+                    await self.send_task_response(
+                        task=completed_task,
+                        last_step=last_step,
+                        api_key=api_key,
+                        close_browser_on_completion=close_browser_on_completion,
+                    )
+                    return last_step, detailed_output, None
 
             # If the step failed, mark the step as failed and retry
             if step.status == StepStatus.failed:
@@ -273,6 +307,7 @@ class ForgeAgent:
                     next_step,
                     api_key=api_key,
                     close_browser_on_completion=close_browser_on_completion,
+                    complete_on_download=complete_on_download,
                 )
             elif SettingsManager.get_settings().execute_all_steps() and next_step:
                 return await self.execute_step(
@@ -281,6 +316,7 @@ class ForgeAgent:
                     next_step,
                     api_key=api_key,
                     close_browser_on_completion=close_browser_on_completion,
+                    complete_on_download=complete_on_download,
                 )
             else:
                 LOG.info(
@@ -294,28 +330,39 @@ class ForgeAgent:
 
             return step, detailed_output, next_step
         # TODO (kerem): Let's add other exceptions that we know about here as custom exceptions as well
-        except StepTerminationError as e:
+        except StepUnableToExecuteError:
             LOG.error(
-                "Step cannot be executed. Task terminated",
+                "Step cannot be executed. Task execution stopped",
                 task_id=task.task_id,
                 step_id=step.step_id,
+            )
+            raise
+        except StepTerminationError as e:
+            LOG.warning(
+                "Step cannot be executed. Task failed.",
+                task_id=task.task_id,
+                step_id=step.step_id,
+                exc_info=True,
             )
             await self.update_step(
                 step=step,
                 status=StepStatus.failed,
+                force_update=True,
             )
             task = await self.update_task(
                 task,
                 status=TaskStatus.failed,
                 failure_reason=e.message,
+                force_update=True,
             )
             await self.send_task_response(
                 task=task,
                 last_step=step,
                 api_key=api_key,
                 close_browser_on_completion=close_browser_on_completion,
+                skip_cleanup=True,
             )
-            return step, detailed_output, next_step
+            return step, detailed_output, None
         except FailedToSendWebhook:
             LOG.exception(
                 "Failed to send webhook",
@@ -458,7 +505,7 @@ class ForgeAgent:
 
             # build a linked action chain by the action_idx
             action_linked_list: list[ActionLinkedNode] = []
-            element_id_to_action_index: dict[int, int] = dict()
+            element_id_to_action_index: dict[str, int] = dict()
             for action_idx, action in enumerate(actions):
                 node = ActionLinkedNode(action=action)
                 action_linked_list.append(node)
@@ -473,7 +520,7 @@ class ForgeAgent:
 
                 element_id_to_action_index[action.element_id] = action_idx
 
-            element_id_to_last_action: dict[int, int] = dict()
+            element_id_to_last_action: dict[str, int] = dict()
             for action_idx, action_node in enumerate(action_linked_list):
                 action = action_node.action
                 if isinstance(action, WebAction):
@@ -579,7 +626,7 @@ class ForgeAgent:
                         status=StepStatus.failed,
                         output=detailed_agent_step_output.to_agent_step_output(),
                     )
-                    return failed_step, detailed_agent_step_output
+                    return failed_step, detailed_agent_step_output.get_clean_detailed_output()
 
             LOG.info(
                 "Actions executed successfully, marking step as completed",
@@ -595,7 +642,7 @@ class ForgeAgent:
                 status=StepStatus.completed,
                 output=detailed_agent_step_output.to_agent_step_output(),
             )
-            return completed_step, detailed_agent_step_output
+            return completed_step, detailed_agent_step_output.get_clean_detailed_output()
         except CancelledError:
             LOG.exception(
                 "CancelledError in agent_step, marking step as failed",
@@ -609,7 +656,7 @@ class ForgeAgent:
                 status=StepStatus.failed,
                 output=detailed_agent_step_output.to_agent_step_output(),
             )
-            return failed_step, detailed_agent_step_output
+            return failed_step, detailed_agent_step_output.get_clean_detailed_output()
         except Exception:
             LOG.exception(
                 "Unexpected exception in agent_step, marking step as failed",
@@ -623,7 +670,7 @@ class ForgeAgent:
                 status=StepStatus.failed,
                 output=detailed_agent_step_output.to_agent_step_output(),
             )
-            return failed_step, detailed_agent_step_output
+            return failed_step, detailed_agent_step_output.get_clean_detailed_output()
 
     async def record_artifacts_after_action(self, task: Task, step: Step, browser_state: BrowserState) -> None:
         if not browser_state.page:
@@ -778,6 +825,11 @@ class ForgeAgent:
         )
         await app.ARTIFACT_MANAGER.create_artifact(
             step=step,
+            artifact_type=ArtifactType.VISIBLE_ELEMENTS_ID_FRAME_MAP,
+            data=json.dumps(scraped_page.id_to_frame_dict, indent=2).encode(),
+        )
+        await app.ARTIFACT_MANAGER.create_artifact(
+            step=step,
             artifact_type=ArtifactType.VISIBLE_ELEMENTS_TREE,
             data=json.dumps(scraped_page.element_tree, indent=2).encode(),
         )
@@ -798,7 +850,7 @@ class ForgeAgent:
         # Get action results from the last app.SETTINGS.PROMPT_ACTION_HISTORY_WINDOW steps
         steps = await app.DATABASE.get_task_steps(task_id=task.task_id, organization_id=task.organization_id)
         window_steps = steps[-1 * SettingsManager.get_settings().PROMPT_ACTION_HISTORY_WINDOW :]
-        actions_and_results: list[tuple[ActionTypeUnion, list[ActionResult]]] = []
+        actions_and_results: list[tuple[Action, list[ActionResult]]] = []
         for window_step in window_steps:
             if window_step.output and window_step.output.actions_and_results:
                 actions_and_results.extend(window_step.output.actions_and_results)
@@ -807,7 +859,7 @@ class ForgeAgent:
         return json.dumps(
             [
                 {
-                    "action": action.model_dump(exclude_none=True),
+                    "action": action.model_dump(exclude_none=True, exclude={"text", "confidence_float"}),
                     "results": [
                         result.model_dump(
                             exclude_none=True,
@@ -892,6 +944,7 @@ class ForgeAgent:
         api_key: str | None = None,
         close_browser_on_completion: bool = True,
         skip_artifacts: bool = False,
+        skip_cleanup: bool = False,
     ) -> None:
         """
         send the task response to the webhook callback url
@@ -910,6 +963,10 @@ class ForgeAgent:
             )
             raise TaskNotFound(task_id=task.task_id) from e
         task = refreshed_task
+        if skip_cleanup:
+            await self.execute_task_webhook(task=task, last_step=last_step, api_key=api_key)
+            return
+
         # log the task status as an event
         analytics.capture("skyvern-oss-agent-task-status", {"status": task.status})
         # We skip the artifacts and send the webhook response directly only when there is an issue with the browser
@@ -1118,8 +1175,10 @@ class ForgeAgent:
         output: AgentStepOutput | None = None,
         is_last: bool | None = None,
         retry_index: int | None = None,
+        force_update: bool = False,
     ) -> Step:
-        step.validate_update(status, output, is_last)
+        if not force_update:
+            step.validate_update(status, output, is_last)
         updates: dict[str, Any] = {}
         if status is not None:
             updates["status"] = status
@@ -1153,8 +1212,10 @@ class ForgeAgent:
         status: TaskStatus,
         extracted_information: dict[str, Any] | list | str | None = None,
         failure_reason: str | None = None,
+        force_update: bool = False,
     ) -> Task:
-        task.validate_update(status, extracted_information, failure_reason)
+        if not force_update:
+            task.validate_update(status, extracted_information, failure_reason)
         updates: dict[str, Any] = {}
         if status is not None:
             updates["status"] = status

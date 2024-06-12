@@ -8,6 +8,11 @@ import { SettingsPageLayout } from "./routes/settings/SettingsPageLayout";
 import { TaskDetails } from "./routes/tasks/detail/TaskDetails";
 import { CreateNewTaskLayout } from "./routes/tasks/create/CreateNewTaskLayout";
 import { CreateNewTaskFormPage } from "./routes/tasks/create/CreateNewTaskFormPage";
+import { TaskActions } from "./routes/tasks/detail/TaskActions";
+import { TaskRecording } from "./routes/tasks/detail/TaskRecording";
+import { TaskParameters } from "./routes/tasks/detail/TaskParameters";
+import { StepArtifactsLayout } from "./routes/tasks/detail/StepArtifactsLayout";
+import { CreateNewTaskFromPrompt } from "./routes/tasks/create/CreateNewTaskFromPrompt";
 
 const router = createBrowserRouter([
   {
@@ -29,6 +34,28 @@ const router = createBrowserRouter([
           {
             path: ":taskId",
             element: <TaskDetails />,
+            children: [
+              {
+                index: true,
+                element: <Navigate to="actions" />,
+              },
+              {
+                path: "actions",
+                element: <TaskActions />,
+              },
+              {
+                path: "recording",
+                element: <TaskRecording />,
+              },
+              {
+                path: "parameters",
+                element: <TaskParameters />,
+              },
+              {
+                path: "diagnostics",
+                element: <StepArtifactsLayout />,
+              },
+            ],
           },
         ],
       },
@@ -39,6 +66,10 @@ const router = createBrowserRouter([
           {
             index: true,
             element: <TaskTemplates />,
+          },
+          {
+            path: "sk-prompt",
+            element: <CreateNewTaskFromPrompt />,
           },
           {
             path: ":template",

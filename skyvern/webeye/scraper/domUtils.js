@@ -342,6 +342,10 @@ function isInteractable(element) {
 
   const tagName = element.tagName.toLowerCase();
 
+  if (tagName === "iframe") {
+    return false;
+  }
+
   if (tagName === "a" && element.href) {
     return true;
   }
@@ -476,12 +480,12 @@ function getElementContext(element) {
   // if the element already has a context, then add it to the list first
   for (var child of element.childNodes) {
     let childContext = "";
-    if (child.nodeType === Node.TEXT_NODE) {
+    if (child.nodeType === Node.TEXT_NODE && isElementVisible(element)) {
       if (!element.hasAttribute("unique_id")) {
-        childContext = child.data.trim();
+        childContext = getVisibleText(child).trim();
       }
     } else if (child.nodeType === Node.ELEMENT_NODE) {
-      if (!child.hasAttribute("unique_id")) {
+      if (!child.hasAttribute("unique_id") && isElementVisible(child)) {
         childContext = getElementContext(child);
       }
     }
@@ -492,13 +496,36 @@ function getElementContext(element) {
   return fullContext.join(";");
 }
 
+function getVisibleText(element) {
+  let visibleText = [];
+
+  function collectVisibleText(node) {
+    if (
+      node.nodeType === Node.TEXT_NODE &&
+      isElementVisible(node.parentElement)
+    ) {
+      const trimmedText = node.data.trim();
+      if (trimmedText.length > 0) {
+        visibleText.push(trimmedText);
+      }
+    } else if (node.nodeType === Node.ELEMENT_NODE && isElementVisible(node)) {
+      for (let child of node.childNodes) {
+        collectVisibleText(child);
+      }
+    }
+  }
+
+  collectVisibleText(element);
+  return visibleText.join(" ");
+}
+
 function getElementContent(element, skipped_element = null) {
   // DFS to get all the text content from all the nodes under the element
   if (skipped_element && element === skipped_element) {
     return "";
   }
 
-  let textContent = element.textContent;
+  let textContent = getVisibleText(element);
   let nodeContent = "";
   // if element has children, then build a list of text and join with a semicolon
   if (element.childNodes.length > 0) {
@@ -507,8 +534,10 @@ function getElementContent(element, skipped_element = null) {
     for (var child of element.childNodes) {
       let childText = "";
       if (child.nodeType === Node.TEXT_NODE) {
-        childText = child.data.trim();
-        nodeTextContentList.push(childText);
+        childText = getVisibleText(child).trim();
+        if (childText.length > 0) {
+          nodeTextContentList.push(childText);
+        }
       } else if (child.nodeType === Node.ELEMENT_NODE) {
         // childText = child.textContent.trim();
         childText = getElementContent(child, skipped_element);
@@ -540,6 +569,7 @@ function getElementContent(element, skipped_element = null) {
 function getSelectOptions(element) {
   const options = Array.from(element.options);
   const selectOptions = [];
+
   for (const option of options) {
     selectOptions.push({
       optionIndex: option.index,
@@ -554,16 +584,28 @@ function getListboxOptions(element) {
   var optionElements = element.querySelectorAll('[role="option"]');
   let selectOptions = [];
   for (var i = 0; i < optionElements.length; i++) {
-    var ele = optionElements[i];
+    let ele = optionElements[i];
+
     selectOptions.push({
       optionIndex: i,
-      text: removeMultipleSpaces(ele.textContent),
+      text: removeMultipleSpaces(getVisibleText(ele)),
     });
   }
   return selectOptions;
 }
 
-function buildTreeFromBody() {
+function uniqueId() {
+  const characters =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let result = "";
+  for (let i = 0; i < 4; i++) {
+    const randomIndex = Math.floor(Math.random() * characters.length);
+    result += characters[randomIndex];
+  }
+  return result;
+}
+
+function buildTreeFromBody(frame = "main.frame") {
   var elements = [];
   var resultArray = [];
 
@@ -620,7 +662,7 @@ function buildTreeFromBody() {
   };
 
   function buildElementObject(element, interactable) {
-    var element_id = elements.length;
+    var element_id = element.getAttribute("unique_id") ?? uniqueId();
     var elementTagNameLower = element.tagName.toLowerCase();
     element.setAttribute("unique_id", element_id);
     // if element is an "a" tag and has a target="_blank" attribute, remove the target attribute
@@ -666,6 +708,7 @@ function buildTreeFromBody() {
 
     let elementObj = {
       id: element_id,
+      frame: frame,
       interactable: interactable,
       tagName: elementTagNameLower,
       attributes: attrs,
@@ -733,7 +776,10 @@ function buildTreeFromBody() {
       // If the element is interactable and has an interactable parent,
       // then add it to the children of the parent
       else {
-        elements[parentId].children.push(elementObj);
+        // TODO: use dict/object so that we access these in O(1) instead
+        elements
+          .find((element) => element.id === parentId)
+          .children.push(elementObj);
       }
       // options already added to the select.options, no need to add options anymore
       if (elementObj.options && elementObj.options.length > 0) {
@@ -744,6 +790,11 @@ function buildTreeFromBody() {
         processElement(child, elementObj.id);
       });
       return elementObj;
+    } else if (element.tagName.toLowerCase() === "iframe") {
+      let iframeElementObject = buildElementObject(element, false);
+
+      elements.push(iframeElementObject);
+      resultArray.push(iframeElementObject);
     } else {
       // For a non-interactable element, if it has direct text, we also tagged
       // it with unique_id, but with interatable=false in the element.
@@ -759,7 +810,7 @@ function buildTreeFromBody() {
         for (let i = 0; i < element.childNodes.length; i++) {
           var node = element.childNodes[i];
           if (node.nodeType === Node.TEXT_NODE) {
-            textContent += node.textContent.trim();
+            textContent += getVisibleText(node).trim();
           }
         }
 
@@ -772,13 +823,16 @@ function buildTreeFromBody() {
           if (parentId === null) {
             resultArray.push(elementObj);
           } else {
-            elements[parentId].children.push(elementObj);
+            // TODO: use dict/object so that we access these in O(1) instead
+            elements
+              .find((element) => element.id === parentId)
+              .children.push(elementObj);
           }
           parentId = elementObj.id;
         }
       }
       getChildElements(element).forEach((child) => {
-        let children = processElement(child, parentId);
+        processElement(child, parentId);
       });
     }
   }
@@ -975,8 +1029,6 @@ function buildTreeFromBody() {
   // TODO: Handle iframes
   // setup before parsing the dom
   checkSelect2();
-  // Clear all the unique_id attributes so that there are no conflicts
-  removeAllUniqueIdAttributes();
   processElement(document.body, null);
 
   for (var element of elements) {
@@ -1027,14 +1079,6 @@ function drawBoundingBoxes(elements) {
   var groups = groupElementsVisually(elements);
   var hintMarkers = createHintMarkersForGroups(groups);
   addHintMarkersToPage(hintMarkers);
-}
-
-function removeAllUniqueIdAttributes() {
-  var elementsWithUniqueId = document.querySelectorAll("[unique_id]");
-
-  elementsWithUniqueId.forEach(function (element) {
-    element.removeAttribute("unique_id");
-  });
 }
 
 function captchaSolvedCallback() {
@@ -1127,7 +1171,21 @@ function createHintMarkersForGroups(groups) {
   for (let i = 0; i < hintMarkers.length; i++) {
     const hintMarker = hintMarkers[i];
     hintMarker.hintString = hintStrings[i];
-    hintMarker.element.innerHTML = hintMarker.hintString.toUpperCase();
+    try {
+      hintMarker.element.innerHTML = hintMarker.hintString.toUpperCase();
+    } catch (e) {
+      // Ensure trustedTypes is available
+      if (typeof trustedTypes !== "undefined") {
+        const escapeHTMLPolicy = trustedTypes.createPolicy("default", {
+          createHTML: (string) => string,
+        });
+        hintMarker.element.innerHTML = escapeHTMLPolicy.createHTML(
+          hintMarker.hintString.toUpperCase(),
+        );
+      } else {
+        console.error("trustedTypes is not supported in this environment.");
+      }
+    }
   }
 
   return hintMarkers;

@@ -18,6 +18,7 @@ from skyvern.forge.sdk.db.models import (
     OrganizationModel,
     OutputParameterModel,
     StepModel,
+    TaskGenerationModel,
     TaskModel,
     WorkflowModel,
     WorkflowParameterModel,
@@ -42,6 +43,7 @@ from skyvern.forge.sdk.db.utils import (
     convert_to_workflow_run_parameter,
 )
 from skyvern.forge.sdk.models import Organization, OrganizationAuthToken, Step, StepStatus
+from skyvern.forge.sdk.schemas.task_generations import TaskGeneration
 from skyvern.forge.sdk.schemas.tasks import ProxyLocation, Task, TaskStatus
 from skyvern.forge.sdk.workflow.models.parameter import (
     AWSSecretParameter,
@@ -293,6 +295,8 @@ class AgentDB:
         retry_index: int | None = None,
         organization_id: str | None = None,
         incremental_cost: float | None = None,
+        incremental_input_tokens: int | None = None,
+        incremental_output_tokens: int | None = None,
     ) -> Step:
         try:
             async with self.Session() as session:
@@ -307,13 +311,17 @@ class AgentDB:
                     if status is not None:
                         step.status = status
                     if output is not None:
-                        step.output = output.model_dump()
+                        step.output = output.model_dump(exclude_none=True)
                     if is_last is not None:
                         step.is_last = is_last
                     if retry_index is not None:
                         step.retry_index = retry_index
                     if incremental_cost is not None:
                         step.step_cost = incremental_cost + float(step.step_cost or 0)
+                    if incremental_input_tokens is not None:
+                        step.input_token_count = incremental_input_tokens + (step.input_token_count or 0)
+                    if incremental_output_tokens is not None:
+                        step.output_token_count = incremental_output_tokens + (step.output_token_count or 0)
 
                     await session.commit()
                     updated_step = await self.get_step(task_id, step_id, organization_id)
@@ -1018,6 +1026,7 @@ class AgentDB:
         url_parameter_key: str,
         key: str,
         description: str | None = None,
+        bitwarden_collection_id: str | None = None,
     ) -> BitwardenLoginCredentialParameter:
         async with self.Session() as session:
             bitwarden_login_credential_parameter = BitwardenLoginCredentialParameterModel(
@@ -1028,6 +1037,7 @@ class AgentDB:
                 url_parameter_key=url_parameter_key,
                 key=key,
                 description=description,
+                bitwarden_collection_id=bitwarden_collection_id,
             )
             session.add(bitwarden_login_credential_parameter)
             await session.commit()
@@ -1230,3 +1240,34 @@ class AgentDB:
             )
             await session.execute(stmt)
             await session.commit()
+
+    async def create_task_generation(
+        self,
+        organization_id: str,
+        user_prompt: str,
+        url: str | None = None,
+        navigation_goal: str | None = None,
+        navigation_payload: dict[str, Any] | None = None,
+        data_extraction_goal: str | None = None,
+        extracted_information_schema: dict[str, Any] | None = None,
+        llm: str | None = None,
+        llm_prompt: str | None = None,
+        llm_response: str | None = None,
+    ) -> TaskGeneration:
+        async with self.Session() as session:
+            new_task_generation = TaskGenerationModel(
+                organization_id=organization_id,
+                user_prompt=user_prompt,
+                url=url,
+                navigation_goal=navigation_goal,
+                navigation_payload=navigation_payload,
+                data_extraction_goal=data_extraction_goal,
+                extracted_information_schema=extracted_information_schema,
+                llm=llm,
+                llm_prompt=llm_prompt,
+                llm_response=llm_response,
+            )
+            session.add(new_task_generation)
+            await session.commit()
+            await session.refresh(new_task_generation)
+            return TaskGeneration.model_validate(new_task_generation)
